@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <queries>
         <package android:name="ru.yandex.yandexnavi" />
         <package android:name="ru.yandex.music" />
     </queries>
 
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
     <application
         android:allowBackup="false"
         android:label="YETI DRIVE"

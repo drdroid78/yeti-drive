@@ -6,10 +6,14 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import com.yandex.mapkit.MapKitFactory
+import com.yandex.mapkit.mapview.MapView
 
 class MainActivity : Activity() {
     private val bg = Color.rgb(15, 17, 20)
@@ -17,11 +21,42 @@ class MainActivity : Activity() {
     private val muted = Color.rgb(155, 162, 172)
     private val white = Color.rgb(242, 244, 247)
 
+    private var mapView: MapView? = null
+    private var mapKitInitialized = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = bg
         window.navigationBarColor = bg
+
+        val apiKey = BuildConfig.MAPKIT_API_KEY
+        if (apiKey.isNotBlank()) {
+            try {
+                MapKitFactory.setApiKey(apiKey)
+                MapKitFactory.initialize(this)
+                mapKitInitialized = true
+                mapView = MapView(this)
+            } catch (e: Exception) {
+                Toast.makeText(this, "Не удалось запустить Яндекс MapKit", Toast.LENGTH_LONG).show()
+            }
+        }
         showHome()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (mapKitInitialized) {
+            MapKitFactory.getInstance().onStart()
+            mapView?.onStart()
+        }
+    }
+
+    override fun onStop() {
+        if (mapKitInitialized) {
+            mapView?.onStop()
+            MapKitFactory.getInstance().onStop()
+        }
+        super.onStop()
     }
 
     private fun dp(value: Int): Int =
@@ -50,11 +85,7 @@ class MainActivity : Activity() {
         if (intent != null) {
             startActivity(intent)
         } else {
-            Toast.makeText(
-                this,
-                "Приложение не найдено: $packageName",
-                Toast.LENGTH_LONG
-            ).show()
+            Toast.makeText(this, "Приложение не найдено: $packageName", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -105,20 +136,35 @@ class MainActivity : Activity() {
             setBackgroundColor(bg)
         }
 
-        val map = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
+        val mapPanel = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(34, 38, 44))
-            setPadding(dp(18), dp(18), dp(18), dp(18))
-            setOnClickListener { launchApp("ru.yandex.yandexnavi") }
         }
-        map.addView(makeText("ЯНДЕКС НАВИГАТОР", 23f, white, true).apply {
-            gravity = Gravity.CENTER
+
+        val currentMap = mapView
+        if (currentMap != null) {
+            (currentMap.parent as? ViewGroup)?.removeView(currentMap)
+            mapPanel.addView(currentMap, FrameLayout.LayoutParams(-1, -1))
+        } else {
+            val message = if (BuildConfig.MAPKIT_API_KEY.isBlank()) {
+                "ДОБАВЬТЕ MAPKIT_API_KEY В GITHUB SECRETS"
+            } else {
+                "КАРТА НЕ ЗАГРУЗИЛАСЬ"
+            }
+            mapPanel.addView(makeText(message, 16f, muted, true).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(20), dp(20), dp(20), dp(20))
+            }, FrameLayout.LayoutParams(-1, -1))
+        }
+
+        val navigationButton = makeButton("Открыть Яндекс Навигатор") {
+            launchApp("ru.yandex.yandexnavi")
+        }
+        mapPanel.addView(navigationButton, FrameLayout.LayoutParams(
+            dp(230), dp(58), Gravity.BOTTOM or Gravity.END
+        ).apply {
+            setMargins(0, 0, dp(16), dp(16))
         })
-        map.addView(makeText("Нажмите, чтобы открыть навигацию", 14f, muted).apply {
-            gravity = Gravity.CENTER
-        })
-        content.addView(map, LinearLayout.LayoutParams(0, -1, 1f))
+        content.addView(mapPanel, LinearLayout.LayoutParams(0, -1, 1f))
 
         val player = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL

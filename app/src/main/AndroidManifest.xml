@@ -3,8 +3,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <queries>
-        <package android:name="ru.yandex.yandexnavi" />
-        <package android:name="ru.yandex.music" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />

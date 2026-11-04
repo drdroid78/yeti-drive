@@ -11,8 +11,8 @@ android {
         applicationId 'ru.yetidrive.launcher'
         minSdk 26
         targetSdk 32
-        versionCode 7
-        versionName '0.7-launcher'
+        versionCode 8
+        versionName '0.8-dashboard'
     }
 
     buildFeatures {

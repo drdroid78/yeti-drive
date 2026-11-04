@@ -2,13 +2,23 @@ package ru.yetidrive.launcher
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
+import android.media.MediaMetadata
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -22,6 +32,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.yandex.mapkit.MapKitFactory
+import com.yandex.mapkit.geometry.Point
+import com.yandex.mapkit.map.CameraPosition
 import com.yandex.mapkit.mapview.MapView
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -44,6 +56,9 @@ class MainActivity : Activity() {
     private val uiHandler = Handler(Looper.getMainLooper())
     private val dateFormat = SimpleDateFormat("EEEE, d MMMM · HH:mm", Locale.forLanguageTag("ru-RU"))
     private val prefs by lazy { getSharedPreferences("yeti_drive", Context.MODE_PRIVATE) }
+    private val mediaSessionManager by lazy {
+        getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+    }
 
     private var mapView: MapView? = null
     private var mapKitInitialized = false
@@ -51,9 +66,21 @@ class MainActivity : Activity() {
     private var weatherIcon: TextView? = null
     private var weatherTemperature: TextView? = null
     private var weatherDescription: TextView? = null
+    private var playerTrackTitle: TextView? = null
+    private var playerTrackSubtitle: TextView? = null
+    private var playerPlayPauseButton: Button? = null
+    private var playerConnectButton: Button? = null
+    private var activeMusicController: MediaController? = null
+    private var mediaReceiverRegistered = false
     private var dockApps: MutableList<String> = mutableListOf()
     private var weatherLocation: WeatherLocation? = null
     private var weatherSnapshot: WeatherSnapshot? = null
+
+    private val mediaUpdateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            refreshPlayer()
+        }
+    }
 
     private val clockTick = object : Runnable {
         override fun run() {
@@ -69,6 +96,7 @@ class MainActivity : Activity() {
 
         dockApps = loadDockApps()
         weatherLocation = loadWeatherLocation()
+        weatherSnapshot = loadWeatherSnapshot()
 
         val apiKey = BuildConfig.MAPKIT_API_KEY
         if (apiKey.isNotBlank()) {
@@ -77,6 +105,7 @@ class MainActivity : Activity() {
                 MapKitFactory.initialize(this)
                 mapKitInitialized = true
                 mapView = MapView(this)
+                moveMapTo(defaultMapLocation())
             } catch (_: Exception) {
                 Toast.makeText(this, "Не удалось запустить Яндекс MapKit", Toast.LENGTH_LONG).show()
             }
@@ -91,6 +120,7 @@ class MainActivity : Activity() {
         dateLabel?.text = dateFormat.format(Date())
         uiHandler.removeCallbacks(clockTick)
         uiHandler.post(clockTick)
+        refreshPlayer()
     }
 
     override fun onPause() {
@@ -100,6 +130,16 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        if (!mediaReceiverRegistered) {
+            val filter = IntentFilter(YetiNotificationListener.ACTION_MEDIA_CHANGED)
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(mediaUpdateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(mediaUpdateReceiver, filter)
+            }
+            mediaReceiverRegistered = true
+        }
         if (mapKitInitialized) {
             MapKitFactory.getInstance().onStart()
             mapView?.onStart()
@@ -110,6 +150,10 @@ class MainActivity : Activity() {
         if (mapKitInitialized) {
             mapView?.onStop()
             MapKitFactory.getInstance().onStop()
+        }
+        if (mediaReceiverRegistered) {
+            unregisterReceiver(mediaUpdateReceiver)
+            mediaReceiverRegistered = false
         }
         super.onStop()
     }
@@ -166,7 +210,7 @@ class MainActivity : Activity() {
         }
 
         val navigationButton = makeButton("Открыть Яндекс Навигатор") {
-            launchApp("ru.yandex.yandexnavi")
+            launchNavigator()
         }
         mapPanel.addView(navigationButton, FrameLayout.LayoutParams(
             dp(230), dp(54), Gravity.BOTTOM or Gravity.END
@@ -245,7 +289,7 @@ class MainActivity : Activity() {
                 side.addView(makeButton(item) {
                     when (item) {
                         "Главная" -> showHome()
-                        "Навигация" -> launchApp("ru.yandex.yandexnavi")
+                        "Навигация" -> launchNavigator()
                         "Музыка" -> launchApp("ru.yandex.music")
                         "Телефон" -> openDialer()
                         "Приложения" -> showAppPicker("Выберите приложение", ::addDockApp)
@@ -264,14 +308,40 @@ class MainActivity : Activity() {
             setBackgroundColor(panel)
             setPadding(dp(14), dp(14), dp(14), dp(14))
         }
-        player.addView(makeText("СЕЙЧАС ИГРАЕТ", 12f, muted, true))
-        player.addView(makeText("Яндекс Музыка", 19f, white, true).apply {
+        player.addView(makeText("ПЛЕЕР", 12f, muted, true))
+        val trackTitle = makeText("Яндекс Музыка", 19f, white, true).apply {
             setPadding(0, dp(12), 0, dp(8))
-        })
-        player.addView(makeText("Откройте приложение для выбора музыки", 13f, muted))
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        playerTrackTitle = trackTitle
+        player.addView(trackTitle)
+        val trackSubtitle = makeText("Плеер не подключён", 13f, muted).apply {
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        playerTrackSubtitle = trackSubtitle
+        player.addView(trackSubtitle)
         player.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
-        player.addView(makeButton("Открыть музыку") { launchApp("ru.yandex.music") },
-            LinearLayout.LayoutParams(-1, dp(52)))
+        val playPauseButton = makeButton("▶ Продолжить") {
+            val controller = activeMusicController ?: return@makeButton
+            if (controller.playbackState?.state == PlaybackState.STATE_PLAYING) {
+                controller.transportControls.pause()
+            } else {
+                controller.transportControls.play()
+            }
+            uiHandler.postDelayed({ refreshPlayer() }, 500L)
+        }.apply { visibility = View.GONE }
+        playerPlayPauseButton = playPauseButton
+        player.addView(playPauseButton, LinearLayout.LayoutParams(-1, dp(48)))
+        val connectButton = makeButton("Подключить плеер") { openMediaAccessSettings() }
+        playerConnectButton = connectButton
+        player.addView(connectButton, LinearLayout.LayoutParams(-1, dp(48)).apply {
+            topMargin = dp(6)
+        })
+        player.addView(makeButton("Открыть Яндекс Музыку") { launchApp("ru.yandex.music") },
+            LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(6) })
+        refreshPlayer()
         return player
     }
 
@@ -282,7 +352,7 @@ class MainActivity : Activity() {
             setPadding(dp(14), dp(12), dp(14), dp(12))
             isClickable = true
             isFocusable = true
-            setOnClickListener { showWeatherCityDialog() }
+            setOnClickListener { showWeatherActionsDialog() }
         }
         card.addView(makeText("ПОГОДА", 12f, muted, true))
 
@@ -299,7 +369,10 @@ class MainActivity : Activity() {
         })
         card.addView(summary)
 
-        weatherDescription = makeText("Нажмите, чтобы выбрать город", 13f, muted)
+        weatherDescription = makeText("Нажмите, чтобы выбрать город", 13f, muted).apply {
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
         card.addView(weatherDescription)
         return card
     }
@@ -517,6 +590,87 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun launchNavigator() {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("yandexnavi://"))
+                .setPackage("ru.yandex.yandexnavi")
+            startActivity(intent)
+        } catch (_: Exception) {
+            Toast.makeText(this, "Установи Яндекс Навигатор, чтобы открыть навигацию", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun mediaListenerComponent() = ComponentName(this, YetiNotificationListener::class.java)
+
+    private fun hasMediaAccess(): Boolean {
+        val enabled = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
+        return enabled.split(':').any { ComponentName.unflattenFromString(it) == mediaListenerComponent() }
+    }
+
+    private fun openMediaAccessSettings() {
+        AlertDialog.Builder(this)
+            .setTitle("Подключить музыкальный плеер")
+            .setMessage("Android попросит разрешить доступ к уведомлениям. YETI DRIVE использует его, чтобы показать название трека Яндекс Музыки и управлять воспроизведением.")
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Открыть настройки") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                } catch (_: Exception) {
+                    Toast.makeText(this, "Открой настройки доступа к уведомлениям Android", Toast.LENGTH_LONG).show()
+                }
+            }
+            .show()
+    }
+
+    private fun refreshPlayer() {
+        val titleView = playerTrackTitle ?: return
+        val subtitleView = playerTrackSubtitle ?: return
+        val playButton = playerPlayPauseButton ?: return
+        val connectButton = playerConnectButton ?: return
+
+        if (!hasMediaAccess()) {
+            activeMusicController = null
+            titleView.text = "Яндекс Музыка"
+            subtitleView.text = "Подключи плеер, чтобы видеть название трека и управлять им"
+            connectButton.visibility = View.VISIBLE
+            playButton.visibility = View.GONE
+            return
+        }
+
+        val controller = try {
+            mediaSessionManager.getActiveSessions(mediaListenerComponent())
+                .firstOrNull { it.packageName == "ru.yandex.music" }
+        } catch (_: SecurityException) {
+            null
+        }
+        activeMusicController = controller
+        connectButton.visibility = View.GONE
+
+        if (controller == null) {
+            titleView.text = "Нет активного трека"
+            subtitleView.text = "Открой Яндекс Музыку и запусти воспроизведение"
+            playButton.visibility = View.GONE
+            return
+        }
+
+        val metadata = controller.metadata
+        val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
+        val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty()
+        titleView.text = title.ifBlank { "Яндекс Музыка" }
+        subtitleView.text = artist.ifBlank { "Медиасеанс подключён" }
+        val state = controller.playbackState?.state
+        playButton.text = if (state == PlaybackState.STATE_PLAYING) "Ⅱ  Пауза" else "▶  Продолжить"
+        playButton.visibility = if (state == null) View.GONE else View.VISIBLE
+    }
+
+    private fun defaultMapLocation() = weatherLocation ?: WeatherLocation("Москва", 55.751244, 37.618423)
+
+    private fun moveMapTo(location: WeatherLocation) {
+        mapView?.map?.move(
+            CameraPosition(Point(location.latitude, location.longitude), 12.5f, 0f, 0f)
+        )
+    }
+
     private fun openDialer() {
         try {
             startActivity(Intent(Intent.ACTION_DIAL))
@@ -553,6 +707,18 @@ class MainActivity : Activity() {
             }
     }
 
+    private fun showWeatherActionsDialog() {
+        val city = weatherLocation?.city ?: "Москва"
+        AlertDialog.Builder(this)
+            .setTitle("Погода · $city")
+            .setItems(arrayOf("Обновить погоду", "Выбрать другой город")) { _, index ->
+                if (index == 0) refreshWeather(weatherLocation ?: defaultMapLocation())
+                else showWeatherCityDialog()
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
     private fun searchWeatherCity(query: String) {
         Thread {
             try {
@@ -570,29 +736,68 @@ class MainActivity : Activity() {
                 val snapshot = fetchWeather(location)
                 weatherLocation = location
                 weatherSnapshot = snapshot
+                saveWeatherSnapshot(snapshot)
                 prefs.edit()
                     .putString("weather_city", location.city)
                     .putFloat("weather_latitude", location.latitude.toFloat())
                     .putFloat("weather_longitude", location.longitude.toFloat())
                     .apply()
-                runOnUiThread { renderWeather() }
+                runOnUiThread {
+                    moveMapTo(location)
+                    renderWeather()
+                }
             } catch (error: Exception) {
                 runOnUiThread {
-                    weatherDescription?.text = "Не удалось загрузить · нажмите, чтобы повторить"
+                    if (weatherSnapshot == null) weatherIcon?.text = "⚠"
+                    weatherDescription?.text = readableWeatherError(error)
                     Toast.makeText(this, error.message ?: "Не удалось найти город", Toast.LENGTH_LONG).show()
                 }
             }
         }.start()
     }
 
-    private fun loadWeatherLocation(): WeatherLocation? {
-        val city = prefs.getString("weather_city", null) ?: return null
-        if (!prefs.contains("weather_latitude") || !prefs.contains("weather_longitude")) return null
+    private fun loadWeatherLocation(): WeatherLocation {
+        val city = prefs.getString("weather_city", null)
+            ?: return WeatherLocation("Москва", 55.751244, 37.618423)
+        if (!prefs.contains("weather_latitude") || !prefs.contains("weather_longitude")) {
+            return WeatherLocation("Москва", 55.751244, 37.618423)
+        }
         return WeatherLocation(
             city,
             prefs.getFloat("weather_latitude", 0f).toDouble(),
             prefs.getFloat("weather_longitude", 0f).toDouble()
         )
+    }
+
+    private fun loadWeatherSnapshot(): WeatherSnapshot? {
+        if (!prefs.contains("weather_temperature")) return null
+        return WeatherSnapshot(
+            city = prefs.getString("weather_snapshot_city", "Москва") ?: "Москва",
+            temperature = prefs.getInt("weather_temperature", 0),
+            condition = prefs.getString("weather_condition", "Погода обновлена") ?: "Погода обновлена",
+            icon = prefs.getString("weather_icon", "☁") ?: "☁"
+        )
+    }
+
+    private fun saveWeatherSnapshot(snapshot: WeatherSnapshot) {
+        prefs.edit()
+            .putString("weather_snapshot_city", snapshot.city)
+            .putInt("weather_temperature", snapshot.temperature)
+            .putString("weather_condition", snapshot.condition)
+            .putString("weather_icon", snapshot.icon)
+            .apply()
+    }
+
+    private fun readableWeatherError(error: Exception): String {
+        val message = error.message.orEmpty()
+        return when {
+            message.contains("Unable to resolve host", ignoreCase = true) -> "Нет подключения к интернету"
+            message.contains("timed out", ignoreCase = true) -> "Сервис погоды не ответил вовремя"
+            message.contains("SSL", ignoreCase = true) || message.contains("Handshake", ignoreCase = true) ->
+                "Не удалось установить защищённое соединение"
+            message.contains("Город не найден", ignoreCase = true) -> "Город не найден. Проверь название"
+            else -> "Погода недоступна · ${message.take(46)}"
+        }
     }
 
     private fun refreshWeather(location: WeatherLocation) {
@@ -601,11 +806,15 @@ class MainActivity : Activity() {
             try {
                 val snapshot = fetchWeather(location)
                 weatherSnapshot = snapshot
+                saveWeatherSnapshot(snapshot)
                 runOnUiThread { renderWeather() }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 runOnUiThread {
                     if (weatherSnapshot == null) {
-                        weatherDescription?.text = "Нет данных · нажмите, чтобы повторить"
+                        weatherIcon?.text = "⚠"
+                        weatherDescription?.text = readableWeatherError(error)
+                    } else {
+                        weatherDescription?.text = "${weatherSnapshot?.city} · сохранённые данные"
                     }
                 }
             }

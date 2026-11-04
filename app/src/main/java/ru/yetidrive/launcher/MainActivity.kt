@@ -6,9 +6,6 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
-import android.webkit.WebChromeClient
-import android.webkit.WebSettings
-import android.webkit.WebView
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -19,7 +16,6 @@ class MainActivity : Activity() {
     private val panel = Color.rgb(27, 30, 35)
     private val muted = Color.rgb(155, 162, 172)
     private val white = Color.rgb(242, 244, 247)
-    private var mapWebView: WebView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,10 +83,7 @@ class MainActivity : Activity() {
                     makeButton(item) {
                         when (item) {
                             "Главная" -> showHome()
-                            "Навигация" -> {
-                                // Navigation stays inside the launcher on the home screen.
-                                Toast.makeText(this, "Карта уже открыта на главном экране", Toast.LENGTH_SHORT).show()
-                            }
+                            "Навигация" -> launchApp("ru.yandex.yandexnavi")
                             "Музыка" -> launchApp("ru.yandex.music")
                             else -> Toast.makeText(this, item, Toast.LENGTH_SHORT).show()
                         }
@@ -106,61 +99,26 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
-    private fun createMapView(): WebView {
-        return WebView(this).apply {
-            setBackgroundColor(Color.rgb(34, 38, 44))
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.cacheMode = WebSettings.LOAD_DEFAULT
-            settings.userAgentString = settings.userAgentString + " YETI-DRIVE/0.4"
-            webChromeClient = WebChromeClient()
-            isVerticalScrollBarEnabled = false
-            isHorizontalScrollBarEnabled = false
-
-            val html = """
-                <!doctype html>
-                <html>
-                <head>
-                  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-                  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-                  <style>
-                    html, body, #map { height:100%; width:100%; margin:0; padding:0; background:#22262c; }
-                    .leaflet-control-attribution { font-size:10px; }
-                    .leaflet-control-zoom a { color:#222; }
-                  </style>
-                  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-                </head>
-                <body>
-                  <div id="map"></div>
-                  <script>
-                    const map = L.map('map', { zoomControl:true, attributionControl:true })
-                      .setView([50.0, 10.0], 5);
-                    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                      maxZoom: 19,
-                      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
-                    }).addTo(map);
-                  </script>
-                </body>
-                </html>
-            """.trimIndent()
-            loadDataWithBaseURL("https://www.openstreetmap.org/", html, "text/html", "UTF-8", null)
-        }
-    }
-
     private fun showHome() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(bg)
         }
 
-        val mapContainer = LinearLayout(this).apply {
+        val map = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
             setBackgroundColor(Color.rgb(34, 38, 44))
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            setOnClickListener { launchApp("ru.yandex.yandexnavi") }
         }
-        val map = createMapView()
-        mapWebView = map
-        mapContainer.addView(map, LinearLayout.LayoutParams(-1, -1))
-        content.addView(mapContainer, LinearLayout.LayoutParams(0, -1, 1f))
+        map.addView(makeText("ЯНДЕКС НАВИГАТОР", 23f, white, true).apply {
+            gravity = Gravity.CENTER
+        })
+        map.addView(makeText("Нажмите, чтобы открыть навигацию", 14f, muted).apply {
+            gravity = Gravity.CENTER
+        })
+        content.addView(map, LinearLayout.LayoutParams(0, -1, 1f))
 
         val player = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -182,21 +140,5 @@ class MainActivity : Activity() {
         )
         content.addView(player)
         shell(content)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        mapWebView?.onResume()
-    }
-
-    override fun onPause() {
-        mapWebView?.onPause()
-        super.onPause()
-    }
-
-    override fun onDestroy() {
-        mapWebView?.destroy()
-        mapWebView = null
-        super.onDestroy()
     }
 }

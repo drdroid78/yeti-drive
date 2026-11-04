@@ -1,33 +1,102 @@
 package ru.yetidrive.launcher
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
+import android.media.MediaMetadata
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.yandex.mapkit.MapKitFactory
+import com.yandex.mapkit.geometry.Point
+import com.yandex.mapkit.map.CameraPosition
 import com.yandex.mapkit.mapview.MapView
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URLEncoder
+import java.net.URL
+import java.text.Collator
+import java.text.SimpleDateFormat
+import java.util.Collections
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : Activity() {
     private val bg = Color.rgb(15, 17, 20)
     private val panel = Color.rgb(27, 30, 35)
+    private val raised = Color.rgb(36, 40, 46)
     private val muted = Color.rgb(155, 162, 172)
     private val white = Color.rgb(242, 244, 247)
+    private val accent = Color.rgb(153, 174, 195)
+
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val dateFormat = SimpleDateFormat("EEEE, d MMMM · HH:mm", Locale.forLanguageTag("ru-RU"))
+    private val prefs by lazy { getSharedPreferences("yeti_drive", Context.MODE_PRIVATE) }
+    private val mediaSessionManager by lazy {
+        getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+    }
 
     private var mapView: MapView? = null
     private var mapKitInitialized = false
+    private var dateLabel: TextView? = null
+    private var weatherIcon: TextView? = null
+    private var weatherTemperature: TextView? = null
+    private var weatherDescription: TextView? = null
+    private var playerTrackTitle: TextView? = null
+    private var playerTrackSubtitle: TextView? = null
+    private var playerPlayPauseButton: Button? = null
+    private var playerConnectButton: Button? = null
+    private var activeMusicController: MediaController? = null
+    private var mediaReceiverRegistered = false
+    private var dockApps: MutableList<String> = mutableListOf()
+    private var weatherLocation: WeatherLocation? = null
+    private var weatherSnapshot: WeatherSnapshot? = null
+
+    private val mediaUpdateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            refreshPlayer()
+        }
+    }
+
+    private val clockTick = object : Runnable {
+        override fun run() {
+            dateLabel?.text = dateFormat.format(Date())
+            uiHandler.postDelayed(this, 30_000L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = bg
         window.navigationBarColor = bg
+
+        dockApps = loadDockApps()
+        weatherLocation = loadWeatherLocation()
+        weatherSnapshot = loadWeatherSnapshot()
 
         val apiKey = BuildConfig.MAPKIT_API_KEY
         if (apiKey.isNotBlank()) {
@@ -36,15 +105,41 @@ class MainActivity : Activity() {
                 MapKitFactory.initialize(this)
                 mapKitInitialized = true
                 mapView = MapView(this)
-            } catch (e: Exception) {
+                moveMapTo(defaultMapLocation())
+            } catch (_: Exception) {
                 Toast.makeText(this, "Не удалось запустить Яндекс MapKit", Toast.LENGTH_LONG).show()
             }
         }
+
         showHome()
+        weatherLocation?.let(::refreshWeather)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        dateLabel?.text = dateFormat.format(Date())
+        uiHandler.removeCallbacks(clockTick)
+        uiHandler.post(clockTick)
+        refreshPlayer()
+    }
+
+    override fun onPause() {
+        uiHandler.removeCallbacks(clockTick)
+        super.onPause()
     }
 
     override fun onStart() {
         super.onStart()
+        if (!mediaReceiverRegistered) {
+            val filter = IntentFilter(YetiNotificationListener.ACTION_MEDIA_CHANGED)
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(mediaUpdateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(mediaUpdateReceiver, filter)
+            }
+            mediaReceiverRegistered = true
+        }
         if (mapKitInitialized) {
             MapKitFactory.getInstance().onStart()
             mapView?.onStart()
@@ -56,11 +151,19 @@ class MainActivity : Activity() {
             mapView?.onStop()
             MapKitFactory.getInstance().onStop()
         }
+        if (mediaReceiverRegistered) {
+            unregisterReceiver(mediaUpdateReceiver)
+            mediaReceiverRegistered = false
+        }
         super.onStop()
     }
 
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
+    override fun onDestroy() {
+        uiHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun makeText(value: String, size: Float, color: Int, bold: Boolean = false) =
         TextView(this).apply {
@@ -74,61 +177,12 @@ class MainActivity : Activity() {
     private fun makeButton(label: String, action: () -> Unit) =
         Button(this).apply {
             text = label
+            textSize = 14f
             isAllCaps = false
             setTextColor(white)
-            setBackgroundColor(panel)
+            setBackgroundColor(raised)
             setOnClickListener { action() }
         }
-
-    private fun launchApp(packageName: String) {
-        val intent = packageManager.getLaunchIntentForPackage(packageName)
-        if (intent != null) {
-            startActivity(intent)
-        } else {
-            Toast.makeText(this, "Приложение не найдено: $packageName", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun shell(content: View) {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(bg)
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-        }
-
-        val side = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(panel)
-            setPadding(dp(6), dp(10), dp(6), dp(10))
-        }
-        side.layoutParams = LinearLayout.LayoutParams(dp(112), -1)
-
-        side.addView(makeText("YETI", 20f, white, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, dp(18))
-        })
-
-        listOf("Главная", "Навигация", "Музыка", "Телефон", "Приложения", "Настройки")
-            .forEach { item ->
-                side.addView(
-                    makeButton(item) {
-                        when (item) {
-                            "Главная" -> showHome()
-                            "Навигация" -> launchApp("ru.yandex.yandexnavi")
-                            "Музыка" -> launchApp("ru.yandex.music")
-                            else -> Toast.makeText(this, item, Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    LinearLayout.LayoutParams(-1, dp(52))
-                )
-            }
-
-        root.addView(side)
-        root.addView(content, LinearLayout.LayoutParams(0, -1, 1f).apply {
-            leftMargin = dp(10)
-        })
-        setContentView(root)
-    }
 
     private fun showHome() {
         val content = LinearLayout(this).apply {
@@ -139,7 +193,6 @@ class MainActivity : Activity() {
         val mapPanel = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(34, 38, 44))
         }
-
         val currentMap = mapView
         if (currentMap != null) {
             (currentMap.parent as? ViewGroup)?.removeView(currentMap)
@@ -157,34 +210,685 @@ class MainActivity : Activity() {
         }
 
         val navigationButton = makeButton("Открыть Яндекс Навигатор") {
-            launchApp("ru.yandex.yandexnavi")
+            launchNavigator()
         }
         mapPanel.addView(navigationButton, FrameLayout.LayoutParams(
-            dp(230), dp(58), Gravity.BOTTOM or Gravity.END
+            dp(230), dp(54), Gravity.BOTTOM or Gravity.END
         ).apply {
             setMargins(0, 0, dp(16), dp(16))
         })
         content.addView(mapPanel, LinearLayout.LayoutParams(0, -1, 1f))
 
+        val dashboard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), 0, 0, 0)
+        }
+        dashboard.layoutParams = LinearLayout.LayoutParams(dp(244), -1)
+        dashboard.addView(createWeatherCard(), LinearLayout.LayoutParams(-1, dp(164)))
+        dashboard.addView(createPlayerCard(), LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            topMargin = dp(10)
+        })
+        content.addView(dashboard)
+
+        shell(content)
+        renderWeather()
+    }
+
+    private fun shell(content: View) {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(bg)
+            setPadding(dp(10), dp(8), dp(10), dp(10))
+        }
+
+        val side = createSidePanel()
+        root.addView(side, LinearLayout.LayoutParams(dp(112), -1))
+
+        val right = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        right.layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply {
+            leftMargin = dp(10)
+        }
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(panel)
+            setPadding(dp(14), 0, dp(16), 0)
+        }
+        topBar.addView(makeText("YETI DRIVE", 14f, accent, true))
+        topBar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        dateLabel = makeText(dateFormat.format(Date()), 15f, white, true)
+        topBar.addView(dateLabel)
+        right.addView(topBar, LinearLayout.LayoutParams(-1, dp(42)))
+        right.addView(content, LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            topMargin = dp(10)
+        })
+        right.addView(createDock(), LinearLayout.LayoutParams(-1, dp(92)).apply {
+            topMargin = dp(10)
+        })
+
+        root.addView(right)
+        setContentView(root)
+    }
+
+    private fun createSidePanel(): View {
+        val side = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(panel)
+            setPadding(dp(6), dp(10), dp(6), dp(10))
+        }
+        side.addView(makeText("YETI", 20f, white, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(18))
+        })
+
+        listOf("Главная", "Навигация", "Музыка", "Телефон", "Приложения", "Настройки")
+            .forEach { item ->
+                side.addView(makeButton(item) {
+                    when (item) {
+                        "Главная" -> showHome()
+                        "Навигация" -> launchNavigator()
+                        "Музыка" -> launchApp("ru.yandex.music")
+                        "Телефон" -> openDialer()
+                        "Приложения" -> showAppPicker("Выберите приложение", ::addDockApp)
+                        "Настройки" -> showDockManager()
+                    }
+                }, LinearLayout.LayoutParams(-1, dp(50)).apply {
+                    bottomMargin = dp(5)
+                })
+            }
+        return side
+    }
+
+    private fun createPlayerCard(): View {
         val player = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(panel)
             setPadding(dp(14), dp(14), dp(14), dp(14))
         }
-        player.layoutParams = LinearLayout.LayoutParams(dp(220), -1).apply {
-            leftMargin = dp(10)
-        }
-        player.addView(makeText("СЕЙЧАС ИГРАЕТ", 12f, muted, true))
-        player.addView(makeText("Яндекс Музыка", 19f, white, true).apply {
+        player.addView(makeText("ПЛЕЕР", 12f, muted, true))
+        val trackTitle = makeText("Яндекс Музыка", 19f, white, true).apply {
             setPadding(0, dp(12), 0, dp(8))
-        })
-        player.addView(makeText("Откройте приложение для выбора музыки", 13f, muted))
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        playerTrackTitle = trackTitle
+        player.addView(trackTitle)
+        val trackSubtitle = makeText("Плеер не подключён", 13f, muted).apply {
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        playerTrackSubtitle = trackSubtitle
+        player.addView(trackSubtitle)
         player.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
-        player.addView(
-            makeButton("Открыть музыку") { launchApp("ru.yandex.music") },
-            LinearLayout.LayoutParams(-1, dp(54))
-        )
-        content.addView(player)
-        shell(content)
+        val playPauseButton = makeButton("▶ Продолжить") {
+            val controller = activeMusicController ?: return@makeButton
+            if (controller.playbackState?.state == PlaybackState.STATE_PLAYING) {
+                controller.transportControls.pause()
+            } else {
+                controller.transportControls.play()
+            }
+            uiHandler.postDelayed({ refreshPlayer() }, 500L)
+        }.apply { visibility = View.GONE }
+        playerPlayPauseButton = playPauseButton
+        player.addView(playPauseButton, LinearLayout.LayoutParams(-1, dp(48)))
+        val connectButton = makeButton("Подключить плеер") { openMediaAccessSettings() }
+        playerConnectButton = connectButton
+        player.addView(connectButton, LinearLayout.LayoutParams(-1, dp(48)).apply {
+            topMargin = dp(6)
+        })
+        player.addView(makeButton("Открыть Яндекс Музыку") { launchApp("ru.yandex.music") },
+            LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(6) })
+        refreshPlayer()
+        return player
     }
+
+    private fun createWeatherCard(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(panel)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showWeatherActionsDialog() }
+        }
+        card.addView(makeText("ПОГОДА", 12f, muted, true))
+
+        val summary = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        weatherIcon = makeText("☁", 38f, accent, true).apply { gravity = Gravity.CENTER }
+        summary.addView(weatherIcon, LinearLayout.LayoutParams(dp(54), dp(54)))
+        weatherTemperature = makeText("—°", 32f, white, true)
+        summary.addView(weatherTemperature, LinearLayout.LayoutParams(-2, -1).apply {
+            leftMargin = dp(4)
+        })
+        card.addView(summary)
+
+        weatherDescription = makeText("Нажмите, чтобы выбрать город", 13f, muted).apply {
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        card.addView(weatherDescription)
+        return card
+    }
+
+    private fun createDock(): View {
+        val dock = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(panel)
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+        }
+        dock.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(makeText("БЫСТРЫЙ", 11f, muted, true))
+            addView(makeText("ЗАПУСК", 11f, muted, true))
+        }, LinearLayout.LayoutParams(dp(82), -1))
+
+        val appStrip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(appStrip, ViewGroup.LayoutParams(-2, -1))
+        }
+        dock.addView(scroll, LinearLayout.LayoutParams(0, -1, 1f))
+        renderDockApps(appStrip)
+
+        dock.addView(makeButton("＋ Добавить") { showAppPicker("Добавить приложение", ::addDockApp) },
+            LinearLayout.LayoutParams(dp(112), -1).apply { leftMargin = dp(8) })
+        dock.addView(makeButton("Настроить") { showDockManager() },
+            LinearLayout.LayoutParams(dp(102), -1).apply { leftMargin = dp(6) })
+        return dock
+    }
+
+    private fun renderDockApps(container: LinearLayout) {
+        container.removeAllViews()
+        if (dockApps.isEmpty()) {
+            container.addView(makeText("Добавьте сюда нужные приложения", 13f, muted),
+                LinearLayout.LayoutParams(-2, -1).apply { leftMargin = dp(8) })
+            return
+        }
+
+        dockApps.forEach { packageName ->
+            val appButton = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setBackgroundColor(raised)
+                isClickable = true
+                isFocusable = true
+                contentDescription = appLabel(packageName)
+                setOnClickListener { launchApp(packageName) }
+                setOnLongClickListener {
+                    showDockManager()
+                    true
+                }
+            }
+            val icon = ImageView(this).apply {
+                try {
+                    setImageDrawable(packageManager.getApplicationIcon(packageName))
+                } catch (_: Exception) {
+                    setImageResource(android.R.drawable.sym_def_app_icon)
+                }
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            appButton.addView(icon, LinearLayout.LayoutParams(dp(34), dp(34)))
+            appButton.addView(makeText(appLabel(packageName), 10f, white).apply {
+                gravity = Gravity.CENTER
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(dp(76), dp(18)))
+            container.addView(appButton, LinearLayout.LayoutParams(dp(82), -1).apply {
+                rightMargin = dp(5)
+            })
+        }
+    }
+
+    private fun showAppPicker(title: String, onPicked: (String) -> Unit) {
+        val apps = getLaunchableApps()
+        if (apps.isEmpty()) {
+            Toast.makeText(this, "Не найдены приложения для запуска", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = apps.map { appLabel(it) }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(labels) { _, index -> onPicked(apps[index]) }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun showDockManager() {
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(this).apply { addView(rows) }
+        lateinit var dialog: AlertDialog
+
+        fun redrawRows() {
+            rows.removeAllViews()
+            if (dockApps.isEmpty()) {
+                rows.addView(makeText("Панель пока пустая. Добавьте любое установленное приложение.", 14f, muted).apply {
+                    setPadding(dp(10), dp(14), dp(10), dp(14))
+                })
+            }
+            dockApps.forEachIndexed { index, packageName ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(4), dp(3), dp(4), dp(3))
+                }
+                row.addView(makeText(appLabel(packageName), 14f, white, true).apply {
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }, LinearLayout.LayoutParams(0, dp(48), 1f))
+
+                row.addView(makeButton("↑") {
+                    if (index > 0) {
+                        Collections.swap(dockApps, index, index - 1)
+                        saveDockApps()
+                        redrawRows()
+                        showHome()
+                    }
+                }, LinearLayout.LayoutParams(dp(44), dp(42)).apply { leftMargin = dp(3) })
+                row.addView(makeButton("↓") {
+                    if (index < dockApps.lastIndex) {
+                        Collections.swap(dockApps, index, index + 1)
+                        saveDockApps()
+                        redrawRows()
+                        showHome()
+                    }
+                }, LinearLayout.LayoutParams(dp(44), dp(42)).apply { leftMargin = dp(3) })
+                row.addView(makeButton("Замена") {
+                    dialog.dismiss()
+                    showAppPicker("Выберите приложение на замену") { replacement ->
+                        dockApps[index] = replacement
+                        saveDockApps()
+                        showHome()
+                        showDockManager()
+                    }
+                }, LinearLayout.LayoutParams(dp(78), dp(42)).apply { leftMargin = dp(3) })
+                row.addView(makeButton("×") {
+                    dockApps.removeAt(index)
+                    saveDockApps()
+                    redrawRows()
+                    showHome()
+                }, LinearLayout.LayoutParams(dp(44), dp(42)).apply { leftMargin = dp(3) })
+                rows.addView(row, LinearLayout.LayoutParams(-1, dp(50)))
+            }
+
+            rows.addView(makeButton("＋ Добавить приложение") {
+                dialog.dismiss()
+                showAppPicker("Добавить приложение") { addDockApp(it); showDockManager() }
+            }, LinearLayout.LayoutParams(-1, dp(48)).apply {
+                topMargin = dp(8)
+                bottomMargin = dp(8)
+            })
+        }
+
+        dialog = AlertDialog.Builder(this)
+            .setTitle("Настройка быстрого запуска")
+            .setView(scroll)
+            .setNegativeButton("Готово", null)
+            .create()
+        dialog.setOnShowListener { redrawRows() }
+        dialog.show()
+    }
+
+    private fun getLaunchableApps(): List<String> {
+        val launchIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val collator = Collator.getInstance(Locale.forLanguageTag("ru-RU"))
+        return packageManager.queryIntentActivities(launchIntent, 0)
+            .mapNotNull { it.activityInfo?.packageName }
+            .distinct()
+            .filter { it != packageName }
+            .sortedWith { first, second -> collator.compare(appLabel(first), appLabel(second)) }
+    }
+
+    private fun appLabel(packageName: String): String = try {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
+    } catch (_: Exception) {
+        packageName
+    }
+
+    private fun loadDockApps(): MutableList<String> {
+        val saved = prefs.getString("quick_launch_apps", null)
+        val launchable = getLaunchableApps().toSet()
+        if (saved == null) {
+            return mutableListOf("ru.yandex.yandexnavi", "ru.yandex.music")
+                .filter { it in launchable }.toMutableList()
+        }
+        return saved.split('\n').filter { it.isNotBlank() && it in launchable }.toMutableList()
+    }
+
+    private fun saveDockApps() {
+        prefs.edit().putString("quick_launch_apps", dockApps.joinToString("\n")).apply()
+    }
+
+    private fun addDockApp(packageName: String) {
+        if (packageName in dockApps) {
+            Toast.makeText(this, "Приложение уже добавлено", Toast.LENGTH_SHORT).show()
+            return
+        }
+        dockApps.add(packageName)
+        saveDockApps()
+        showHome()
+    }
+
+    private fun launchApp(packageName: String) {
+        try {
+            val intent = packageManager.getLaunchIntentForPackage(packageName)
+            if (intent != null) startActivity(intent)
+            else Toast.makeText(this, "Приложение не найдено: ${appLabel(packageName)}", Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, "Не удалось открыть ${appLabel(packageName)}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun launchNavigator() {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("yandexnavi://"))
+                .setPackage("ru.yandex.yandexnavi")
+            startActivity(intent)
+        } catch (_: Exception) {
+            Toast.makeText(this, "Установи Яндекс Навигатор, чтобы открыть навигацию", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun mediaListenerComponent() = ComponentName(this, YetiNotificationListener::class.java)
+
+    private fun hasMediaAccess(): Boolean {
+        val enabled = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
+        return enabled.split(':').any { ComponentName.unflattenFromString(it) == mediaListenerComponent() }
+    }
+
+    private fun openMediaAccessSettings() {
+        AlertDialog.Builder(this)
+            .setTitle("Подключить музыкальный плеер")
+            .setMessage("Android попросит разрешить доступ к уведомлениям. YETI DRIVE использует его, чтобы показать название трека Яндекс Музыки и управлять воспроизведением.")
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Открыть настройки") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                } catch (_: Exception) {
+                    Toast.makeText(this, "Открой настройки доступа к уведомлениям Android", Toast.LENGTH_LONG).show()
+                }
+            }
+            .show()
+    }
+
+    private fun refreshPlayer() {
+        val titleView = playerTrackTitle ?: return
+        val subtitleView = playerTrackSubtitle ?: return
+        val playButton = playerPlayPauseButton ?: return
+        val connectButton = playerConnectButton ?: return
+
+        if (!hasMediaAccess()) {
+            activeMusicController = null
+            titleView.text = "Яндекс Музыка"
+            subtitleView.text = "Подключи плеер, чтобы видеть название трека и управлять им"
+            connectButton.visibility = View.VISIBLE
+            playButton.visibility = View.GONE
+            return
+        }
+
+        val controller = try {
+            mediaSessionManager.getActiveSessions(mediaListenerComponent())
+                .firstOrNull { it.packageName == "ru.yandex.music" }
+        } catch (_: SecurityException) {
+            null
+        }
+        activeMusicController = controller
+        connectButton.visibility = View.GONE
+
+        if (controller == null) {
+            titleView.text = "Нет активного трека"
+            subtitleView.text = "Открой Яндекс Музыку и запусти воспроизведение"
+            playButton.visibility = View.GONE
+            return
+        }
+
+        val metadata = controller.metadata
+        val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
+        val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty()
+        titleView.text = title.ifBlank { "Яндекс Музыка" }
+        subtitleView.text = artist.ifBlank { "Медиасеанс подключён" }
+        val state = controller.playbackState?.state
+        playButton.text = if (state == PlaybackState.STATE_PLAYING) "Ⅱ  Пауза" else "▶  Продолжить"
+        playButton.visibility = if (state == null) View.GONE else View.VISIBLE
+    }
+
+    private fun defaultMapLocation() = weatherLocation ?: WeatherLocation("Москва", 55.751244, 37.618423)
+
+    private fun moveMapTo(location: WeatherLocation) {
+        mapView?.map?.move(
+            CameraPosition(Point(location.latitude, location.longitude), 12.5f, 0f, 0f)
+        )
+    }
+
+    private fun openDialer() {
+        try {
+            startActivity(Intent(Intent.ACTION_DIAL))
+        } catch (_: Exception) {
+            Toast.makeText(this, "Телефонное приложение недоступно", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showWeatherCityDialog() {
+        val input = EditText(this).apply {
+            hint = "Например, Казань"
+            setSingleLine(true)
+            setText(weatherLocation?.city.orEmpty())
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Город для погоды")
+            .setMessage("Укажите город, для которого показывать текущую погоду.")
+            .setView(input)
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Найти", null)
+            .create()
+            .also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val city = input.text.toString().trim()
+                        if (city.isNotEmpty()) {
+                            weatherDescription?.text = "Ищем город…"
+                            searchWeatherCity(city)
+                            dialog.dismiss()
+                        }
+                    }
+                }
+                dialog.show()
+            }
+    }
+
+    private fun showWeatherActionsDialog() {
+        val city = weatherLocation?.city ?: "Москва"
+        AlertDialog.Builder(this)
+            .setTitle("Погода · $city")
+            .setItems(arrayOf("Обновить погоду", "Выбрать другой город")) { _, index ->
+                if (index == 0) refreshWeather(weatherLocation ?: defaultMapLocation())
+                else showWeatherCityDialog()
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    private fun searchWeatherCity(query: String) {
+        Thread {
+            try {
+                val encoded = URLEncoder.encode(query, "UTF-8")
+                val json = readJson("https://geocoding-api.open-meteo.com/v1/search?name=$encoded&count=1&language=ru&format=json")
+                val result = json.optJSONArray("results")?.optJSONObject(0)
+                    ?: throw IllegalArgumentException("Город не найден")
+                val city = result.optString("name", query)
+                val admin = result.optString("admin1", "")
+                val location = WeatherLocation(
+                    city = if (admin.isNotBlank() && admin != city) "$city, $admin" else city,
+                    latitude = result.getDouble("latitude"),
+                    longitude = result.getDouble("longitude")
+                )
+                val snapshot = fetchWeather(location)
+                weatherLocation = location
+                weatherSnapshot = snapshot
+                saveWeatherSnapshot(snapshot)
+                prefs.edit()
+                    .putString("weather_city", location.city)
+                    .putFloat("weather_latitude", location.latitude.toFloat())
+                    .putFloat("weather_longitude", location.longitude.toFloat())
+                    .apply()
+                runOnUiThread {
+                    moveMapTo(location)
+                    renderWeather()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (weatherSnapshot == null) weatherIcon?.text = "⚠"
+                    weatherDescription?.text = readableWeatherError(error)
+                    Toast.makeText(this, error.message ?: "Не удалось найти город", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun loadWeatherLocation(): WeatherLocation {
+        val city = prefs.getString("weather_city", null)
+            ?: return WeatherLocation("Москва", 55.751244, 37.618423)
+        if (!prefs.contains("weather_latitude") || !prefs.contains("weather_longitude")) {
+            return WeatherLocation("Москва", 55.751244, 37.618423)
+        }
+        return WeatherLocation(
+            city,
+            prefs.getFloat("weather_latitude", 0f).toDouble(),
+            prefs.getFloat("weather_longitude", 0f).toDouble()
+        )
+    }
+
+    private fun loadWeatherSnapshot(): WeatherSnapshot? {
+        if (!prefs.contains("weather_temperature")) return null
+        return WeatherSnapshot(
+            city = prefs.getString("weather_snapshot_city", "Москва") ?: "Москва",
+            temperature = prefs.getInt("weather_temperature", 0),
+            condition = prefs.getString("weather_condition", "Погода обновлена") ?: "Погода обновлена",
+            icon = prefs.getString("weather_icon", "☁") ?: "☁"
+        )
+    }
+
+    private fun saveWeatherSnapshot(snapshot: WeatherSnapshot) {
+        prefs.edit()
+            .putString("weather_snapshot_city", snapshot.city)
+            .putInt("weather_temperature", snapshot.temperature)
+            .putString("weather_condition", snapshot.condition)
+            .putString("weather_icon", snapshot.icon)
+            .apply()
+    }
+
+    private fun readableWeatherError(error: Exception): String {
+        val message = error.message.orEmpty()
+        return when {
+            message.contains("Unable to resolve host", ignoreCase = true) -> "Нет подключения к интернету"
+            message.contains("timed out", ignoreCase = true) -> "Сервис погоды не ответил вовремя"
+            message.contains("SSL", ignoreCase = true) || message.contains("Handshake", ignoreCase = true) ->
+                "Не удалось установить защищённое соединение"
+            message.contains("Город не найден", ignoreCase = true) -> "Город не найден. Проверь название"
+            else -> "Погода недоступна · ${message.take(46)}"
+        }
+    }
+
+    private fun refreshWeather(location: WeatherLocation) {
+        weatherDescription?.text = "Обновляем погоду…"
+        Thread {
+            try {
+                val snapshot = fetchWeather(location)
+                weatherSnapshot = snapshot
+                saveWeatherSnapshot(snapshot)
+                runOnUiThread { renderWeather() }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (weatherSnapshot == null) {
+                        weatherIcon?.text = "⚠"
+                        weatherDescription?.text = readableWeatherError(error)
+                    } else {
+                        weatherDescription?.text = "${weatherSnapshot?.city} · сохранённые данные"
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun fetchWeather(location: WeatherLocation): WeatherSnapshot {
+        val json = readJson(
+            "https://api.open-meteo.com/v1/forecast" +
+                "?latitude=${location.latitude}&longitude=${location.longitude}" +
+                "&current=temperature_2m,weather_code&timezone=auto"
+        )
+        val current = json.getJSONObject("current")
+        val temperature = current.getDouble("temperature_2m").toInt()
+        val code = current.getInt("weather_code")
+        val condition = when (code) {
+            0 -> "Ясно"
+            1 -> "Преимущественно ясно"
+            2 -> "Переменная облачность"
+            3 -> "Облачно"
+            45, 48 -> "Туман"
+            in 51..57 -> "Морось"
+            in 61..67 -> "Дождь"
+            in 71..77 -> "Снег"
+            in 80..82 -> "Ливень"
+            85, 86 -> "Снегопад"
+            in 95..99 -> "Гроза"
+            else -> "Погода обновлена"
+        }
+        val icon = when (code) {
+            0, 1 -> "☀"
+            2 -> "⛅"
+            3, 45, 48 -> "☁"
+            in 51..67, in 80..82 -> "☂"
+            in 71..77, 85, 86 -> "❄"
+            in 95..99 -> "⚡"
+            else -> "☁"
+        }
+        return WeatherSnapshot(location.city, temperature, condition, icon)
+    }
+
+    private fun readJson(address: String): JSONObject {
+        val connection = URL(address).openConnection() as HttpURLConnection
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 10_000
+        connection.requestMethod = "GET"
+        return try {
+            if (connection.responseCode !in 200..299) {
+                throw IllegalStateException("Сервис погоды вернул ошибку ${connection.responseCode}")
+            }
+            JSONObject(connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun renderWeather() {
+        val snapshot = weatherSnapshot
+        val location = weatherLocation
+        if (snapshot != null) {
+            weatherIcon?.text = snapshot.icon
+            weatherTemperature?.text = "${snapshot.temperature}°"
+            weatherDescription?.text = "${snapshot.condition} · ${snapshot.city}"
+        } else if (location != null) {
+            weatherIcon?.text = "☁"
+            weatherTemperature?.text = "—°"
+            weatherDescription?.text = "${location.city} · нажмите для обновления"
+        } else {
+            weatherIcon?.text = "☁"
+            weatherTemperature?.text = "—°"
+            weatherDescription?.text = "Нажмите, чтобы выбрать город"
+        }
+    }
+
+    private data class WeatherLocation(val city: String, val latitude: Double, val longitude: Double)
+    private data class WeatherSnapshot(val city: String, val temperature: Int, val condition: String, val icon: String)
 }

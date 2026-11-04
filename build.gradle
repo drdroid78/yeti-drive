@@ -2,3 +2,17 @@ plugins {
     id 'com.android.application' version '8.7.3' apply false
     id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
 }
+
+
+// MapKit key is supplied by GitHub Actions secret or local.properties.
+// Never commit the real key to the repository.
+def mapkitKey = System.getenv("MAPKIT_API_KEY")
+if (mapkitKey == null || mapkitKey.trim().isEmpty()) {
+    def localPropsFile = rootProject.file("local.properties")
+    if (localPropsFile.exists()) {
+        def localProps = new Properties()
+        localPropsFile.withInputStream { localProps.load(it) }
+        mapkitKey = localProps.getProperty("MAPKIT_API_KEY", "")
+    }
+}
+ext.mapkitApiKey = mapkitKey ?: ""
